@@ -4,9 +4,13 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 type ResponseData struct {
@@ -20,13 +24,26 @@ type ShortRequest struct {
 }
 
 type DataUrls struct {
-	urls map[string]string
+	urls   map[string]string
+	Redist *redis.Client
 }
 
 func main() {
 
+	err := godotenv.Load()
+	if err != nil {
+		panic("Error load Env file")
+	}
+
+	redist := initRedit()
+
+	if redist == nil {
+		panic("Redist Error")
+	}
+
 	dataUrls := &DataUrls{
-		urls: make(map[string]string),
+		urls:   make(map[string]string),
+		Redist: redist,
 	}
 
 	route := gin.Default()
@@ -75,6 +92,28 @@ func (du *DataUrls) getShort(ctx *gin.Context) {
 }
 
 func (du *DataUrls) postShort(ctx *gin.Context) {
+
+	Newredis := du.Redist
+
+	//limiter
+	val, err := Newredis.Get(ctx, ctx.ClientIP()).Result()
+	limit, _ := Newredis.TTL(ctx, ctx.ClientIP()).Result()
+
+	if err == redis.Nil {
+		Newredis.Set(ctx, ctx.ClientIP(), 10, time.Minute*2)
+	} else if err == nil {
+
+		valInt, _ := strconv.Atoi(val)
+		if valInt <= 0 {
+			ctx.JSON(http.StatusServiceUnavailable, map[string]any{
+				"error":            "Rate limit exceeded",
+				"rate_limit_reset": limit / time.Nanosecond / time.Minute,
+			})
+			return
+		}
+
+	}
+
 	var shortRequest ShortRequest
 
 	ctx.Bind(&shortRequest)
@@ -83,12 +122,35 @@ func (du *DataUrls) postShort(ctx *gin.Context) {
 
 	du.urls[shortKey] = shortRequest.Url
 
+	dataCode, _ := Newredis.Get(ctx, shortKey).Result()
+
+	if dataCode != "" {
+		ctx.JSON(http.StatusForbidden, map[string]any{
+			"error": "URL Custom short is already in use",
+		})
+		return
+	}
+
+	err = Newredis.Set(ctx, shortKey, shortRequest.Url, 24*3600*time.Second).Err()
+
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, map[string]any{
+			"error":   "Unable to connect to server",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	remainingQuota, _ := Newredis.Decr(ctx, ctx.ClientIP()).Result()
+
 	res := &ResponseData{
 		Code:    200,
 		Message: "Success",
 		Data: map[string]any{
-			"urlORi":   shortRequest.Url,
-			"urlShort": fmt.Sprintf("http://localhost:8080/short/%s", shortKey),
+			"urlORi":           shortRequest.Url,
+			"urlShort":         fmt.Sprintf("http://localhost:8080/short/%s", shortKey),
+			"rate_limit":       int(remainingQuota),
+			"rate_limit_reset": int(limit / time.Nanosecond / time.Minute),
 		},
 	}
 
@@ -111,4 +173,13 @@ func getRandKey() string {
 
 	return string(shortKey)
 
+}
+
+func initRedit() *redis.Client {
+	client := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIST_ADD"),
+		Password: os.Getenv("REDIST_PASS"),
+	})
+
+	return client
 }
