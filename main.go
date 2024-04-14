@@ -35,15 +35,13 @@ func main() {
 		panic("Error load Env file")
 	}
 
-	redist := initRedit()
+	redis := initRedis()
 
-	if redist == nil {
-		panic("Redist Error")
-	}
+	defer redis.Close()
 
 	dataUrls := &DataUrls{
 		urls:   make(map[string]string),
-		Redist: redist,
+		Redist: redis,
 	}
 
 	route := gin.Default()
@@ -76,9 +74,13 @@ func (du *DataUrls) getShort(ctx *gin.Context) {
 		return
 	}
 
-	urlOri, found := du.urls[code]
+	Newredis := du.Redist
 
-	if !found {
+	data, _ := Newredis.Get(ctx, code).Result()
+
+	defer Newredis.Close()
+
+	if data == "" {
 		res := &ResponseData{
 			Code:    http.StatusNotFound,
 			Message: "Code not found!",
@@ -88,7 +90,7 @@ func (du *DataUrls) getShort(ctx *gin.Context) {
 		return
 	}
 
-	ctx.Redirect(http.StatusMovedPermanently, urlOri)
+	ctx.Redirect(http.StatusMovedPermanently, data)
 }
 
 func (du *DataUrls) postShort(ctx *gin.Context) {
@@ -175,7 +177,7 @@ func getRandKey() string {
 
 }
 
-func initRedit() *redis.Client {
+func initRedis() *redis.Client {
 	client := redis.NewClient(&redis.Options{
 		Addr:     os.Getenv("REDIST_ADD"),
 		Password: os.Getenv("REDIST_PASS"),
